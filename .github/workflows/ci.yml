@@ -60,7 +60,9 @@ jobs:
           ninja --version
           clang-tidy --version | grep -i version
           if [ "$RUNNER_OS" = Windows ]; then
-            clang --version | tee /dev/stderr | grep -q 'windows-gnu' \
+            # No /dev/stderr in Git Bash on Windows, so capture instead of tee.
+            v="$(clang --version)"; echo "$v"; command -v clang
+            grep -q 'windows-gnu' <<<"$v" \
               || { echo "::error::clang on PATH is not llvm-mingw"; exit 1; }
           fi
 
