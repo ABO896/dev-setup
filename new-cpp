@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+"""new-cpp — scaffold a C or C++ CMake project pre-wired for Zed.
+
+Creates: CMakeLists.txt, CMakePresets.json, .clangd, .clang-tidy, .clang-format,
+.zed/{tasks,debug,settings}.json, .gitignore, src/main.{cpp,c}, include/.
+
+Usage:
+  new-cpp myproject                 # new C++ project in ./myproject
+  new-cpp myproject --lang c        # C project instead
+  new-cpp --here                    # wire up the current directory (never overwrites)
+  new-cpp myproject --std 23 --open # C++23, then open in Zed
+  new-cpp                           # interactive wizard (also runnable as a Zed task)
+
+Works on macOS (Apple clang / Homebrew LLVM) and Windows (llvm-mingw + PowerShell 7).
+The generated files are tailored to the OS you run this on.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+IS_MAC = platform.system() == "Darwin"
+IS_WIN = platform.system() == "Windows"
+EXE = ".exe" if IS_WIN else ""
+
+
+# --------------------------------------------------------------------------- templates
+
+def cmakelists(name: str, lang: str, std: str) -> str:
+    if lang == "cpp":
+        lang_kw, std_block, glob = "CXX", (
+            f"set(CMAKE_CXX_STANDARD {std})\n"
+            "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+            "set(CMAKE_CXX_EXTENSIONS OFF)\n"
+        ), "src/*.cpp"
+        extra_warn = " -Wnon-virtual-dtor -Wold-style-cast -Woverloaded-virtual"
+        tidy_prop = "CXX_CLANG_TIDY"
+        compiler_var = "CMAKE_CXX_COMPILER"
+    else:
+        lang_kw, std_block, glob = "C", (
+            f"set(CMAKE_C_STANDARD {std})\n"
+            "set(CMAKE_C_STANDARD_REQUIRED ON)\n"
+            "set(CMAKE_C_EXTENSIONS OFF)\n"
+        ), "src/*.c"
+        extra_warn = " -Wstrict-prototypes -Wmissing-prototypes"
+        tidy_prop = "C_CLANG_TIDY"
+        compiler_var = "CMAKE_C_COMPILER"
+
+    return f"""cmake_minimum_required(VERSION 3.25)
+project({name} VERSION 0.1.0 LANGUAGES {lang_kw})
+
+{std_block}set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # clangd reads build/<preset>/compile_commands.json
+
+option(ENABLE_SANITIZERS   "Build with AddressSanitizer + UBSan"  OFF)
+option(ENABLE_CLANG_TIDY   "Run clang-tidy on every compile"      OFF)
+option(WARNINGS_AS_ERRORS  "Treat compiler warnings as errors"    OFF)
+
+# Every .{'cpp' if lang == 'cpp' else 'c'} under src/ is compiled. CONFIGURE_DEPENDS re-globs on each build,
+# so new files are picked up automatically — no need to edit this file.
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "${{CMAKE_CURRENT_SOURCE_DIR}}/{glob}")
+
+add_executable(${{PROJECT_NAME}} ${{SOURCES}})
+target_include_directories(${{PROJECT_NAME}} PRIVATE "${{CMAKE_CURRENT_SOURCE_DIR}}/include")
+
+target_compile_options(${{PROJECT_NAME}} PRIVATE
+    -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion{extra_warn}
+    $<$<BOOL:${{WARNINGS_AS_ERRORS}}>:-Werror>
+)
+
+if(ENABLE_SANITIZERS)
+    target_compile_options(${{PROJECT_NAME}} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(${{PROJECT_NAME}} PRIVATE -fsanitize=address,undefined)
+endif()
+
+if(ENABLE_CLANG_TIDY)
+    find_program(CLANG_TIDY_EXE NAMES clang-tidy REQUIRED)
+    set_target_properties(${{PROJECT_NAME}} PROPERTIES {tidy_prop} "${{CLANG_TIDY_EXE}}")
+endif()
+
+# Windows (llvm-mingw): programs need libc++/libunwind (and the ASan runtime) DLLs at run
+# time. They live in <toolchain>/x86_64-w64-mingw32/bin, which is not on PATH, so copy
+# them next to the .exe after each build. Does nothing on macOS/Linux.
+if(MINGW)
+    get_filename_component(_tc_bin "${{{compiler_var}}}" DIRECTORY)
+    file(GLOB _rt_dlls
+        "${{_tc_bin}}/../*-w64-mingw32/bin/libc++.dll"
+        "${{_tc_bin}}/../*-w64-mingw32/bin/libunwind.dll"
+        "${{_tc_bin}}/../*-w64-mingw32/bin/libclang_rt.asan_dynamic-*.dll")
+    foreach(_dll IN LISTS _rt_dlls)
+        add_custom_command(TARGET ${{PROJECT_NAME}} POST_BUILD
+            COMMAND ${{CMAKE_COMMAND}} -E copy_if_different "${{_dll}}" "$<TARGET_FILE_DIR:${{PROJECT_NAME}}>")
+    endforeach()
+endif()
+
+enable_testing()
+add_test(NAME ${{PROJECT_NAME}}.runs COMMAND ${{PROJECT_NAME}})
+"""
+
+
+def presets() -> str:
+    base_cache = {"CMAKE_EXPORT_COMPILE_COMMANDS": "ON"}
+    if IS_MAC:
+        # CMake 4.x no longer passes -isysroot on macOS by default; without it, Homebrew
+        # clangd/clang-tidy can't find the SDK headers ('iostream' file not found).
+        base_cache["CMAKE_OSX_SYSROOT"] = "macosx"
+    if IS_WIN:
+        # Pin llvm-mingw's clang so CMake never picks up MSVC (cl) or a stray g++.
+        base_cache["CMAKE_C_COMPILER"] = "clang"
+        base_cache["CMAKE_CXX_COMPILER"] = "clang++"
+
+    data = {
+        "version": 6,
+        "cmakeMinimumRequired": {"major": 3, "minor": 25, "patch": 0},
+        "configurePresets": [
+            {
+                "name": "base",
+                "hidden": True,
+                "generator": "Ninja",
+                "binaryDir": "${sourceDir}/build/${presetName}",
+                "cacheVariables": base_cache,
+            },
+            {
+                "name": "debug",
+                "displayName": "Debug (+ASan/UBSan)",
+                "inherits": "base",
+                "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "ENABLE_SANITIZERS": "ON"},
+            },
+            {
+                "name": "release",
+                "displayName": "Release",
+                "inherits": "base",
+                "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"},
+            },
+            {
+                "name": "lint",
+                "displayName": "Lint (clang-tidy on every file)",
+                "inherits": "base",
+                "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "ENABLE_CLANG_TIDY": "ON"},
+            },
+        ],
+        "buildPresets": [
+            {"name": n, "configurePreset": n} for n in ("debug", "release", "lint")
+        ],
+        "testPresets": [
+            {"name": "debug", "configurePreset": "debug", "output": {"outputOnFailure": True}}
+        ],
+        "workflowPresets": [
+            {
+                "name": n,
+                "steps": [
+                    {"type": "configure", "name": n},
+                    {"type": "build", "name": n},
+                ],
+            }
+            for n in ("debug", "release", "lint")
+        ]
+        + [
+            {
+                "name": "test",
+                "steps": [
+                    {"type": "configure", "name": "debug"},
+                    {"type": "build", "name": "debug"},
+                    {"type": "test", "name": "debug"},
+                ],
+            }
+        ],
+    }
+    return json.dumps(data, indent=2) + "\n"
+
+
+CLANGD = """\
+# clangd project config — https://clangd.llvm.org/config
+CompileFlags:
+  CompilationDatabase: build/debug   # where CMake writes compile_commands.json
+Diagnostics:
+  ClangTidy:
+    FastCheckFilter: Strict          # live linting only runs fast checks; `lint` task runs everything
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+Hover:
+  ShowAKA: true
+"""
+
+CLANG_TIDY = """\
+# Read by clangd (live, in-editor) and by the `lint` preset (whole project).
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  -cppcoreguidelines-avoid-magic-numbers,
+  misc-*,
+  -misc-include-cleaner,
+  -misc-non-private-member-variables-in-classes,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  performance-*,
+  portability-*,
+  readability-*,
+  -readability-magic-numbers,
+  -readability-identifier-length
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*/(src|include)/.*'
+FormatStyle: file
+"""
+
+# The user's chosen style.
+CLANG_FORMAT = """\
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Attach
+DerivePointerAlignment: false
+PointerAlignment: Left
+SortIncludes: true
+"""
+
+GITIGNORE = """\
+build/
+.cache/
+compile_commands.json
+.DS_Store
+"""
+
+
+def zed_tasks(name: str) -> str:
+    if IS_WIN:
+        fmt = ("Get-ChildItem -Path src, include -Recurse -Include *.c, *.h, *.cpp, *.hpp "
+               "| ForEach-Object { clang-format -i $_.FullName }")
+    else:
+        fmt = "find src include \\( -name '*.[ch]' -o -name '*.[ch]pp' \\) -exec clang-format -i {} +"
+    tasks = [
+        {"label": "build (debug)", "command": "cmake --workflow --preset debug"},
+        {"label": "build (release)", "command": "cmake --workflow --preset release"},
+        {
+            "label": "run (debug)",
+            "command": f"cmake --workflow --preset debug && ./build/debug/{name}{EXE}",
+        },
+        {
+            "label": "run (release)",
+            "command": f"cmake --workflow --preset release && ./build/release/{name}{EXE}",
+        },
+        {"label": "test", "command": "cmake --workflow --preset test"},
+        {"label": "lint (clang-tidy, whole project)", "command": "cmake --workflow --preset lint"},
+        {"label": "format (all sources)", "command": fmt},
+        {"label": "clean", "command": "cmake -E rm -rf build"},
+    ]
+    for t in tasks:
+        t["cwd"] = "$ZED_WORKTREE_ROOT"
+        t["use_new_terminal"] = False
+        t["allow_concurrent_runs"] = False
+        t["reveal"] = "always"
+        if IS_WIN:
+            # PowerShell 7: the built-in Windows PowerShell 5.1 has no `&&`.
+            t["shell"] = {"program": "pwsh"}
+    return json.dumps(tasks, indent=2) + "\n"
+
+
+def zed_debug(name: str) -> str:
+    cfg = [
+        {
+            "label": f"Debug {name}",
+            "adapter": "CodeLLDB",
+            "request": "launch",
+            "program": f"$ZED_WORKTREE_ROOT/build/debug/{name}{EXE}",
+            "args": [],
+            "cwd": "$ZED_WORKTREE_ROOT",
+            # LeakSanitizer can't run under a debugger (ptrace); keep ASan, drop leak checks.
+            # (Windows ASan has no leak checker, so only abort_on_error applies there.)
+            "env": {"ASAN_OPTIONS": "abort_on_error=1" if IS_WIN
+                    else "detect_leaks=0:abort_on_error=1"},
+            "build": "build (debug)",
+        }
+    ]
+    return json.dumps(cfg, indent=2) + "\n"
+
+
+ZED_SETTINGS = """\
+{
+  "languages": {
+    "C++": { "tab_size": 4, "format_on_save": "on" },
+    "C": { "tab_size": 4, "format_on_save": "on" }
+  }
+}
+"""
+
+MAIN_CPP = """\
+#include <iostream>
+#include <numeric>
+#include <vector>
+
+int main() {
+    std::vector<int> values{1, 2, 3, 4, 5};
+    const int sum = std::accumulate(values.begin(), values.end(), 0);  // set a breakpoint here
+    std::cout << "sum = " << sum << '\\n';
+    return 0;
+}
+"""
+
+MAIN_C = """\
+#include <stdio.h>
+
+int main(void) {
+    int values[] = {1, 2, 3, 4, 5};
+    int sum = 0;
+    for (size_t i = 0; i < sizeof values / sizeof values[0]; ++i) {
+        sum += values[i];  // set a breakpoint here
+    }
+    printf("sum = %d\\n", sum);
+    return 0;
+}
+"""
+
+
+# --------------------------------------------------------------------------- logic
+
+def write(path: Path, content: str, created: list[str], skipped: list[str], root: Path) -> None:
+    rel = str(path.relative_to(root))
+    if path.exists():
+        skipped.append(rel)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # newline="\n": same LF files on Mac and Windows, so git doesn't see every line changed.
+    path.write_text(content, encoding="utf-8", newline="\n")
+    created.append(rel)
+
+
+# --------------------------------------------------------------------------- wizard
+
+CONFIG = Path.home() / ".config" / "new-cpp.json"   # remembers the last location used
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    try:
+        value = input(f"{prompt}{suffix}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
+        sys.exit(1)
+    return value or default
+
+
+def _choose(prompt: str, options: list[str], default: int = 0) -> int:
+    print(f"\n{prompt}")
+    for i, opt in enumerate(options, 1):
+        print(f"  {i}) {opt}{'   (default)' if i - 1 == default else ''}")
+    while True:
+        raw = _ask("Choose", str(default + 1))
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return int(raw) - 1
+        print(f"  Type a number from 1 to {len(options)}.")
+
+
+def _yes(prompt: str, default: bool = True) -> bool:
+    while True:
+        raw = _ask(f"{prompt} (y/n)", "y" if default else "n").lower()
+        if raw in ("y", "yes", "s", "si", "sí"):
+            return True
+        if raw in ("n", "no"):
+            return False
+
+
+def wizard() -> argparse.Namespace:
+    print("=== New C/C++ project ===  (Enter accepts the [default], Ctrl+C cancels)\n")
+    while True:
+        name = _ask("Project name")
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", name):
+            break
+        print("  Letters, digits, _ and - only; must start with a letter or _.")
+
+    lang = ("cpp", "c")[_choose("Language", ["C++", "C"])]
+    if lang == "cpp":
+        stds = ["20", "23", "17"]
+        std = stds[_choose("C++ standard", ["C++20", "C++23 (needed for std::print)", "C++17"])]
+    else:
+        stds = ["17", "23", "11"]
+        std = stds[_choose("C standard", ["C17", "C23", "C11"])]
+
+    last = ""
+    try:
+        last = json.loads(CONFIG.read_text(encoding="utf-8")).get("location", "")
+    except (OSError, ValueError):
+        pass
+    print()
+    location = Path(_ask("Create it inside which folder", last or str(Path.home()))).expanduser()
+
+    print()
+    git = _yes("Initialise a git repo")
+    open_zed = _yes("Open it in Zed when done")
+
+    target = location / name
+    print(f"\n  {('C++' if lang == 'cpp' else 'C')}{std} project → {target}"
+          f"\n  git: {'yes' if git else 'no'}   open in Zed: {'yes' if open_zed else 'no'}")
+    if target.exists() and any(target.iterdir()):
+        print("  (folder exists and isn't empty: existing files are kept, missing ones added)")
+    if not _yes("\nCreate it", True):
+        print("Cancelled.")
+        sys.exit(1)
+
+    try:
+        CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG.write_text(json.dumps({"location": str(location)}), encoding="utf-8")
+    except OSError:
+        pass
+
+    location.mkdir(parents=True, exist_ok=True)
+    os.chdir(location)
+    return argparse.Namespace(name=name, lang=lang, std=std, here=False,
+                              no_git=not git, no_configure=False, open=open_zed)
+
+
+# --------------------------------------------------------------------------- main
+
+def main() -> int:
+    if len(sys.argv) == 1 and sys.stdin.isatty():
+        return create(wizard())
+
+    ap = argparse.ArgumentParser(description="Scaffold a C/C++ CMake project wired for Zed. "
+                                 "Run with no arguments for the interactive wizard.")
+    ap.add_argument("name", nargs="?", help="project name (also the directory and executable name)")
+    ap.add_argument("--lang", choices=("cpp", "c"), default="cpp")
+    ap.add_argument("--std", help="language standard (default: 20 for C++, 17 for C)")
+    ap.add_argument("--here", action="store_true", help="scaffold into the current directory")
+    ap.add_argument("--no-git", action="store_true", help="skip `git init`")
+    ap.add_argument("--no-configure", action="store_true", help="skip the initial CMake configure")
+    ap.add_argument("--open", action="store_true", help="open the project in Zed afterwards")
+    a = ap.parse_args()
+    if not a.name and not a.here:
+        ap.error("give a project name, use --here, or run with no arguments for the wizard")
+    return create(a)
+
+
+def create(a: argparse.Namespace) -> int:
+    if a.here:
+        root = Path.cwd()
+        name = a.name or root.name
+    else:
+        root = Path.cwd() / a.name
+        name = a.name
+
+    name = re.sub(r"[^A-Za-z0-9_-]", "_", name)
+    if not name or name[0].isdigit():
+        print(f"new-cpp: invalid project name {name!r}: must start with a letter or underscore")
+        return 2
+
+    std = a.std or ("20" if a.lang == "cpp" else "17")
+    root.mkdir(parents=True, exist_ok=True)
+
+    created: list[str] = []
+    skipped: list[str] = []
+    files = {
+        "CMakeLists.txt": cmakelists(name, a.lang, std),
+        "CMakePresets.json": presets(),
+        ".clangd": CLANGD,
+        ".clang-tidy": CLANG_TIDY,
+        ".clang-format": CLANG_FORMAT,
+        ".gitignore": GITIGNORE,
+        ".zed/tasks.json": zed_tasks(name),
+        ".zed/debug.json": zed_debug(name),
+        ".zed/settings.json": ZED_SETTINGS,
+    }
+    src = "src/main.cpp" if a.lang == "cpp" else "src/main.c"
+    if not any((root / "src").glob("*.c*")):
+        files[src] = MAIN_CPP if a.lang == "cpp" else MAIN_C
+    (root / "include").mkdir(exist_ok=True)
+
+    for rel, content in files.items():
+        write(root / rel, content, created, skipped, root)
+
+    print(f"→ {root}")
+    for f in created:
+        print(f"  + {f}")
+    for f in skipped:
+        print(f"  = {f} (exists, left untouched)")
+
+    if not a.no_git and shutil.which("git") and not (root / ".git").exists():
+        subprocess.run(["git", "init", "-q"], cwd=root, check=False)
+        print("  + git repo")
+
+    if not a.no_configure:
+        missing = [t for t in ("cmake", "ninja") if not shutil.which(t)]
+        if missing:
+            print(f"  ! {', '.join(missing)} not on PATH — skipped configure")
+        else:
+            r = subprocess.run(["cmake", "--preset", "debug"], cwd=root,
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                print("  + configured build/debug (compile_commands.json ready for clangd)")
+            else:
+                print("  ! cmake configure failed:\n" + r.stderr.strip())
+
+    if a.open:
+        zed = shutil.which("zed")
+        if zed:
+            # On Windows the CLI may be a .cmd shim, which needs cmd.exe to launch.
+            cmd = ["cmd", "/c", zed, str(root)] if zed.lower().endswith((".cmd", ".bat")) \
+                else [zed, str(root)]
+            subprocess.run(cmd, check=False)
+        else:
+            print("  ! `zed` CLI not found (Zed → command palette → `cli: install`)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

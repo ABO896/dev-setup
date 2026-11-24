@@ -1,0 +1,16 @@
+// Global Zed tasks (Windows) — install.py writes this into %APPDATA%\Zed\tasks.json,
+// replacing __HOME__ with your user folder. Edit it here, then re-run install.py.
+[
+  {
+    "label": "C/C++: new project (wizard)",
+    "command": "python",
+    "args": ["__HOME__/.local/bin/new-cpp"],
+    "shell": { "program": "pwsh" },
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "reveal_target": "center",
+    "hide": "on_success",
+    "save": "none"
+  }
+]

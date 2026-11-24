@@ -1,0 +1,5 @@
+# Zed settings stay local (per-machine fonts, API keys) and never go in this repo.
+settings.json
+*.bak-*
+.DS_Store
+__pycache__/

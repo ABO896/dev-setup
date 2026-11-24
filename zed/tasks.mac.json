@@ -1,0 +1,32 @@
+// Global Zed tasks (macOS) — linked into ~/.config/zed/tasks.json by install.py.
+// Edit this file in the repo, not the linked copy.
+[
+  {
+    "label": "C/C++: new project (wizard)",
+    "command": "~/.local/bin/new-cpp",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "reveal_target": "center",
+    "hide": "on_success",
+    "save": "none"
+  },
+  {
+    "label": "C++: run current file",
+    "command": "mkdir -p /tmp/zed-run && /usr/bin/clang++ -std=c++23 -g -O0 -Wall -Wextra -fsanitize=address,undefined \"$ZED_FILE\" -o /tmp/zed-run/$ZED_STEM && /tmp/zed-run/$ZED_STEM",
+    "cwd": "$ZED_DIRNAME",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "save": "current"
+  },
+  {
+    "label": "C: run current file",
+    "command": "mkdir -p /tmp/zed-run && /usr/bin/clang -std=c17 -g -O0 -Wall -Wextra -fsanitize=address,undefined \"$ZED_FILE\" -o /tmp/zed-run/$ZED_STEM && /tmp/zed-run/$ZED_STEM",
+    "cwd": "$ZED_DIRNAME",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "save": "current"
+  }
+]
