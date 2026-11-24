@@ -12,7 +12,8 @@ Usage:
   new-cpp myproject --std 23 --open # C++23, then open in Zed
   new-cpp                           # interactive wizard (also runnable as a Zed task)
 
-Works on macOS (Apple clang / Homebrew LLVM) and Windows (llvm-mingw + PowerShell 7).
+Works on macOS (Apple clang / Homebrew LLVM), Linux (GCC or Clang) and Windows
+(llvm-mingw + PowerShell 7).
 The generated files are tailored to the OS you run this on.
 """
 

@@ -1,6 +1,6 @@
 # dev-setup
 
-A C/C++ setup for the [Zed](https://zed.dev) editor on **macOS** and **Windows**:
+A C/C++ setup for the [Zed](https://zed.dev) editor on **macOS**, **Linux** and **Windows**:
 one command (or a wizard inside Zed) creates a CMake project with code intelligence,
 linting, formatting, sanitizers and debugging already wired up.
 
@@ -9,7 +9,7 @@ linting, formatting, sanitizers and debugging already wired up.
 | File | What it does |
 |---|---|
 | `new-cpp` | Creates a project: `CMakeLists.txt` (auto-collects `src/`, strict warnings, ASan/UBSan in debug), `CMakePresets.json` (debug / release / lint / test), `.clangd`, `.clang-tidy`, `.clang-format`, and Zed tasks + a CodeLLDB debug config. Run with no arguments for an interactive wizard. |
-| `zed/tasks.mac.json`, `zed/tasks.windows.json` | Global Zed tasks: the new-project wizard (+ "run current file" for single C/C++ files on Mac). |
+| `zed/tasks.{mac,linux,windows}.json` | Global Zed tasks: the new-project wizard (+ "run current file" for single C/C++ files on Mac and Linux). |
 | `install.py` | Puts the files above in place. Never touches Zed's `settings.json`. |
 | `tests/` | Regression tests for both scripts (`python3 -m unittest discover -s tests -v`); CI runs them on macOS, Windows and Linux. |
 
@@ -22,6 +22,17 @@ brew install llvm cmake ninja
 ```
 Then put Homebrew's LLVM on your PATH. In fish: `fish_add_path /opt/homebrew/opt/llvm/bin`.
 In zsh: add `export PATH="/opt/homebrew/opt/llvm/bin:$PATH"` to `~/.zshrc`.
+
+**Linux**: Zed from [zed.dev/download](https://zed.dev/download), then a compiler, CMake ≥ 3.25,
+Ninja and the clang tools:
+```sh
+# Debian / Ubuntu (24.04 or newer, for CMake ≥ 3.25)
+sudo apt install build-essential cmake ninja-build clangd clang-tidy clang-format git python3
+# Fedora
+sudo dnf install gcc-c++ libasan libubsan cmake ninja-build clang-tools-extra git python3
+```
+Projects build with the system default compiler (usually GCC); clangd and clang-tidy read
+its flags from `compile_commands.json`.
 
 **Windows (x64)**, in PowerShell:
 ```powershell
@@ -39,13 +50,14 @@ the generated tasks chain commands with `&&`.
 ## 2. Install this repo
 
 ```sh
-git clone https://github.com/<owner>/dev-setup.git ~/dev-setup
+git clone https://github.com/ABO896/dev-setup.git ~/dev-setup
 cd ~/dev-setup
-python3 install.py          # Windows: python install.py   (in pwsh)
+python3 install.py          # Mac/Linux.  Windows: python install.py   (in pwsh)
 ```
 
 Then, once:
-- **Mac:** make sure `~/.local/bin` is on your PATH (fish: `fish_add_path ~/.local/bin`).
+- **Mac / Linux:** make sure `~/.local/bin` is on your PATH (fish: `fish_add_path ~/.local/bin`;
+  most Linux distributions already add it in `~/.profile` once the folder exists).
 - **Windows:** add the `new-cpp` command to PowerShell:
   ```powershell
   if (!(Test-Path $PROFILE)) { New-Item -ItemType File -Force $PROFILE | Out-Null }
@@ -68,14 +80,15 @@ Settings aren't installed, since they're personal. These are the C/C++ parts tha
 matters if the Swift extension is installed (that's what registers sourcekit-lsp for C/C++),
 but it's harmless otherwise.
 
-**Windows**
+**Linux / Windows**
 ```json
 "languages": {
   "C":   { "tab_size": 4, "format_on_save": "on" },
   "C++": { "tab_size": 4, "format_on_save": "on" }
 }
 ```
-No clangd path needed: Zed uses llvm-mingw's clangd from PATH, which survives `winget upgrade`.
+No clangd path needed: Zed uses the clangd on PATH (llvm-mingw's on Windows, which survives
+`winget upgrade`).
 
 ## Use
 
@@ -101,5 +114,12 @@ No clangd path needed: Zed uses llvm-mingw's clangd from PATH, which survives `w
   off by default anyway, and Windows has no leak checker).
 - **Updating:** edit files in this repo, commit, `git pull` on other machines. On Windows,
   re-run `python install.py` after pulling. Projects already created don't change.
+- **Linux, Flatpak Zed:** the sandboxed build reads its config from
+  `~/.var/app/dev.zed.Zed/config/zed`, which `install.py` doesn't target; use the
+  zed.dev build, or link `zed/tasks.linux.json` there by hand.
 - **Testing changes:** `python3 -m unittest discover -s tests -v`. Build/lint tests are
   skipped automatically when cmake, ninja or clang-tidy aren't on PATH.
+
+## License
+
+[MIT](LICENSE)

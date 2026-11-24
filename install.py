@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """Install this repo's files on macOS or Windows.
 
-  python3 install.py        (Mac)
+  python3 install.py        (Mac, Linux)
   python install.py         (Windows, in PowerShell 7)
 
 What it does:
   - ~/.local/bin/new-cpp     -> repo/new-cpp
   - Zed's global tasks.json  -> repo/zed/tasks.mac.json   (Mac: symlink)
+                                repo/zed/tasks.linux.json (Linux: symlink)
                                 repo/zed/tasks.windows.json (Windows: written with your
                                 user folder filled in)
 
 It never touches Zed's settings.json. Any file it replaces is first renamed to
 *.bak-<timestamp>, never deleted.
 
-Mac: symlinks, so `git pull` updates everything at once.
+Mac/Linux: symlinks, so `git pull` updates everything at once.
 Windows: the tasks file is generated, and new-cpp is a symlink only with Developer
 Mode on (otherwise a copy). Re-run this script after `git pull`.
 """
@@ -35,7 +36,12 @@ SYSTEM = platform.system()
 def zed_config_dir() -> Path:
     if SYSTEM == "Windows":
         return Path(os.environ["APPDATA"]) / "Zed"
-    return Path.home() / ".config" / "zed"   # macOS and Linux
+    if SYSTEM == "Linux":
+        # Zed follows XDG on Linux (only an absolute XDG_CONFIG_HOME counts, per the spec).
+        xdg = os.environ.get("XDG_CONFIG_HOME", "")
+        if os.path.isabs(xdg):
+            return Path(xdg) / "zed"
+    return Path.home() / ".config" / "zed"
 
 
 def backup(dest: Path) -> None:
@@ -90,12 +96,13 @@ def main() -> int:
     print(f"Installing from {REPO}")
     link(REPO / "new-cpp", Path.home() / ".local" / "bin" / "new-cpp")
     if SYSTEM == "Windows":
-        home = Path.home().as_posix()          # e.g. C:/Users/Alvaro
+        home = Path.home().as_posix()          # e.g. C:/Users/<you>
         render(REPO / "zed" / "tasks.windows.json", zed_config_dir() / "tasks.json",
                {"__HOME__": home})
     else:
         os.chmod(REPO / "new-cpp", 0o755)
-        link(REPO / "zed" / "tasks.mac.json", zed_config_dir() / "tasks.json")
+        tasks = "tasks.mac.json" if SYSTEM == "Darwin" else "tasks.linux.json"
+        link(REPO / "zed" / tasks, zed_config_dir() / "tasks.json")
 
     print("\nDone. Zed's settings.json was not touched.")
     return 0
