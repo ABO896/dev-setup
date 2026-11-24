@@ -66,6 +66,15 @@ class TestGenerate(TmpDirTest):
             json.loads((root / f).read_text(encoding="utf-8"))
         self.assertNotIn(b"\r\n", (root / "CMakeLists.txt").read_bytes())
 
+    def test_output_survives_non_utf8_stdout(self) -> None:
+        # Windows CI: piped stdout is cp1252, which can't encode the "→" in create()'s output.
+        env = dict(os.environ, PYTHONIOENCODING="cp1252")
+        r = run(["demo", "--no-git"], self.tmp, env=env, encoding="cp1252")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("UnicodeEncodeError", r.stderr)
+        self.assertIn("demo", r.stdout)
+        self.assertTrue((self.tmp / "demo/CMakeLists.txt").is_file())
+
     def test_cmake_globs_every_cpp_extension(self) -> None:
         run(["demo", "--no-git", "--no-configure"], self.tmp)
         cm = (self.tmp / "demo/CMakeLists.txt").read_text(encoding="utf-8")

@@ -457,6 +457,12 @@ def wizard() -> argparse.Namespace:
 # --------------------------------------------------------------------------- main
 
 def main() -> int:
+    # Redirected output on Windows is encoded with the ANSI code page (cp1252), which has no
+    # "→"/"—"; degrade those to "?" instead of crashing mid-create().
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     if len(sys.argv) == 1 and sys.stdin.isatty():
         return create(wizard())
 
