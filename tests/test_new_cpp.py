@@ -230,17 +230,22 @@ class TestToolchain(TmpDirTest):
 # --------------------------------------------------------------------------- install.py
 
 class TestInstall(TmpDirTest):
-    def install(self, fake_windows: bool, no_symlinks: bool) -> subprocess.CompletedProcess[str]:
+    def install(self, system: str = "", no_symlinks: bool = False, xdg: str = ""
+                ) -> subprocess.CompletedProcess[str]:
+        """Run install.py with a temp HOME; `system` fakes platform.system() if given."""
         home = self.tmp / "home"
         env = dict(os.environ, HOME=str(home), USERPROFILE=str(home),
                    APPDATA=str(self.tmp / "appdata"))
+        env.pop("XDG_CONFIG_HOME", None)
+        if xdg:
+            env["XDG_CONFIG_HOME"] = xdg
         return run_patched(f"""
             import pathlib, platform, runpy, sys
             if {no_symlinks}:
                 def nosym(self, *a, **k): raise OSError("no symlink privilege")
                 pathlib.Path.symlink_to = nosym
-            if {fake_windows}:
-                platform.system = lambda: "Windows"
+            if {system!r}:
+                platform.system = lambda: {system!r}
             sys.argv = ["install.py"]
             runpy.run_path({str(INSTALL)!r}, run_name="__main__")
         """, self.tmp, env)
@@ -250,37 +255,68 @@ class TestInstall(TmpDirTest):
 
     def test_copy_fallback_is_idempotent(self) -> None:
         for _ in range(3):
-            r = self.install(fake_windows=True, no_symlinks=True)
+            r = self.install(system="Windows", no_symlinks=True)
             self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.bin_dir(), ["new-cpp"])
 
     def test_stale_copy_is_backed_up_once(self) -> None:
-        self.install(fake_windows=True, no_symlinks=True)
+        self.install(system="Windows", no_symlinks=True)
         (self.tmp / "home/.local/bin/new-cpp").write_text("old version")
-        self.install(fake_windows=True, no_symlinks=True)
-        self.install(fake_windows=True, no_symlinks=True)
+        self.install(system="Windows", no_symlinks=True)
+        self.install(system="Windows", no_symlinks=True)
         names = self.bin_dir()
         self.assertEqual(len(names), 2, names)
         self.assertTrue(names[1].startswith("new-cpp.bak-"))
 
     def test_windows_tasks_rendered(self) -> None:
-        self.install(fake_windows=True, no_symlinks=True)
+        self.install(system="Windows", no_symlinks=True)
         text = (self.tmp / "appdata/Zed/tasks.json").read_text(encoding="utf-8")
         self.assertNotIn("__HOME__", text)
         home = (self.tmp / "home").as_posix()
         self.assertIn(f'"{home}/.local/bin/new-cpp"', text)
         self.assertIn(f'"cwd": "{home}"', text)
-        r = self.install(fake_windows=True, no_symlinks=True)
+        r = self.install(system="Windows", no_symlinks=True)
         self.assertIn("up to date", r.stdout)
 
     @unittest.skipIf(sys.platform == "win32", "symlinks need Developer Mode on Windows")
     def test_unix_symlinks_idempotent(self) -> None:
         for _ in range(2):
-            r = self.install(fake_windows=False, no_symlinks=False)
+            r = self.install()
             self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("already linked", r.stdout)
         self.assertEqual(self.bin_dir(), ["new-cpp"])
         self.assertTrue((self.tmp / "home/.config/zed/tasks.json").is_symlink())
+
+
+    @unittest.skipIf(sys.platform == "win32", "symlinks need Developer Mode on Windows")
+    def test_linux_links_linux_tasks(self) -> None:
+        r = self.install(system="Linux")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dest = self.tmp / "home/.config/zed/tasks.json"
+        self.assertEqual(dest.resolve(), (REPO / "zed/tasks.linux.json").resolve())
+
+    @unittest.skipIf(sys.platform == "win32", "symlinks need Developer Mode on Windows")
+    def test_linux_honours_xdg_config_home(self) -> None:
+        xdg = self.tmp / "xdg"
+        r = self.install(system="Linux", xdg=str(xdg))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((xdg / "zed/tasks.json").is_symlink())
+        self.assertFalse((self.tmp / "home/.config/zed").exists())
+        # A relative XDG_CONFIG_HOME is invalid per the XDG spec and must be ignored.
+        r = self.install(system="Linux", xdg="relative/dir")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.tmp / "home/.config/zed/tasks.json").is_symlink())
+
+    def test_global_task_files_are_valid(self) -> None:
+        # Zed's tasks.json allows // comments; strip them and parse the rest as JSON.
+        for name in ("tasks.mac.json", "tasks.linux.json", "tasks.windows.json"):
+            text = (REPO / "zed" / name).read_text(encoding="utf-8")
+            body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("//"))
+            labels = [t["label"] for t in json.loads(body)]
+            self.assertIn("C/C++: new project (wizard)", labels, name)
+            # Building into shared /tmp lets another local user pre-create the folder and
+            # swap the binary between compile and run; output must stay under $HOME.
+            self.assertNotIn("/tmp", body, name)
 
 
 if __name__ == "__main__":

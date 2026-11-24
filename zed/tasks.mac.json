@@ -13,7 +13,7 @@
   },
   {
     "label": "C++: run current file",
-    "command": "mkdir -p /tmp/zed-run && /usr/bin/clang++ -std=c++23 -g -O0 -Wall -Wextra -fsanitize=address,undefined \"$ZED_FILE\" -o \"/tmp/zed-run/$ZED_STEM\" && \"/tmp/zed-run/$ZED_STEM\"",
+    "command": "mkdir -p -m 700 \"$HOME/.cache/zed-run\" && /usr/bin/clang++ -std=c++23 -g -O0 -Wall -Wextra -fsanitize=address,undefined \"$ZED_FILE\" -o \"$HOME/.cache/zed-run/$ZED_STEM\" && \"$HOME/.cache/zed-run/$ZED_STEM\"",
     "cwd": "$ZED_DIRNAME",
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
@@ -22,7 +22,7 @@
   },
   {
     "label": "C: run current file",
-    "command": "mkdir -p /tmp/zed-run && /usr/bin/clang -std=c17 -g -O0 -Wall -Wextra -fsanitize=address,undefined \"$ZED_FILE\" -o \"/tmp/zed-run/$ZED_STEM\" && \"/tmp/zed-run/$ZED_STEM\"",
+    "command": "mkdir -p -m 700 \"$HOME/.cache/zed-run\" && /usr/bin/clang -std=c17 -g -O0 -Wall -Wextra -fsanitize=address,undefined \"$ZED_FILE\" -o \"$HOME/.cache/zed-run/$ZED_STEM\" && \"$HOME/.cache/zed-run/$ZED_STEM\"",
     "cwd": "$ZED_DIRNAME",
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
