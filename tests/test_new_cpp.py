@@ -314,6 +314,9 @@ class TestInstall(TmpDirTest):
             body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("//"))
             labels = [t["label"] for t in json.loads(body)]
             self.assertIn("C/C++: new project (wizard)", labels, name)
+            # Building into shared /tmp lets another local user pre-create the folder and
+            # swap the binary between compile and run; output must stay under $HOME.
+            self.assertNotIn("/tmp", body, name)
 
 
 if __name__ == "__main__":
