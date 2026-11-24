@@ -5,12 +5,12 @@
     "label": "C/C++: new project (wizard)",
     "command": "python",
     "args": ["__HOME__/.local/bin/new-cpp"],
+    "cwd": "__HOME__",
     "shell": { "program": "pwsh" },
     "use_new_terminal": true,
     "allow_concurrent_runs": false,
     "reveal": "always",
     "reveal_target": "center",
-    "hide": "on_success",
-    "save": "none"
+    "hide": "on_success"
   }
 ]
