@@ -7,7 +7,8 @@ Creates: CMakeLists.txt, CMakePresets.json, .clangd, .clang-tidy, .clang-format,
 Usage:
   new-cpp myproject                 # new C++ project in ./myproject
   new-cpp myproject --lang c        # C project instead
-  new-cpp --here                    # wire up the current directory (never overwrites)
+  new-cpp --here                    # wire up the current directory (never overwrites;
+                                    # language is detected from existing sources in src/)
   new-cpp myproject --std 23 --open # C++23, then open in Zed
   new-cpp                           # interactive wizard (also runnable as a Zed task)
 
@@ -31,6 +32,13 @@ IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
 EXE = ".exe" if IS_WIN else ""
 
+# Source extensions per language. CMake globs exactly these, and new-cpp uses the same
+# list to decide whether src/ already has code, so the two can never disagree.
+SOURCE_EXTS = {"cpp": (".cpp", ".cc", ".cxx"), "c": (".c",)}
+STANDARDS = {"cpp": ("17", "20", "23", "26"), "c": ("99", "11", "17", "23")}
+DEFAULT_STD = {"cpp": "20", "c": "17"}
+NAME_RE = r"[A-Za-z_][A-Za-z0-9_-]*"
+
 
 # --------------------------------------------------------------------------- templates
 
@@ -40,7 +48,7 @@ def cmakelists(name: str, lang: str, std: str) -> str:
             f"set(CMAKE_CXX_STANDARD {std})\n"
             "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
             "set(CMAKE_CXX_EXTENSIONS OFF)\n"
-        ), "src/*.cpp"
+        ), SOURCE_EXTS["cpp"]
         extra_warn = " -Wnon-virtual-dtor -Wold-style-cast -Woverloaded-virtual"
         tidy_prop = "CXX_CLANG_TIDY"
         compiler_var = "CMAKE_CXX_COMPILER"
@@ -49,10 +57,12 @@ def cmakelists(name: str, lang: str, std: str) -> str:
             f"set(CMAKE_C_STANDARD {std})\n"
             "set(CMAKE_C_STANDARD_REQUIRED ON)\n"
             "set(CMAKE_C_EXTENSIONS OFF)\n"
-        ), "src/*.c"
+        ), SOURCE_EXTS["c"]
         extra_warn = " -Wstrict-prototypes -Wmissing-prototypes"
         tidy_prop = "C_CLANG_TIDY"
         compiler_var = "CMAKE_C_COMPILER"
+    patterns = "\n    ".join(f'"${{CMAKE_CURRENT_SOURCE_DIR}}/src/*{ext}"' for ext in glob)
+    ext_list = ", ".join(glob)
 
     return f"""cmake_minimum_required(VERSION 3.25)
 project({name} VERSION 0.1.0 LANGUAGES {lang_kw})
@@ -63,9 +73,10 @@ option(ENABLE_SANITIZERS   "Build with AddressSanitizer + UBSan"  OFF)
 option(ENABLE_CLANG_TIDY   "Run clang-tidy on every compile"      OFF)
 option(WARNINGS_AS_ERRORS  "Treat compiler warnings as errors"    OFF)
 
-# Every .{'cpp' if lang == 'cpp' else 'c'} under src/ is compiled. CONFIGURE_DEPENDS re-globs on each build,
+# Every {ext_list} file under src/ is compiled. CONFIGURE_DEPENDS re-globs on each build,
 # so new files are picked up automatically — no need to edit this file.
-file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "${{CMAKE_CURRENT_SOURCE_DIR}}/{glob}")
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
+    {patterns})
 
 add_executable(${{PROJECT_NAME}} ${{SOURCES}})
 target_include_directories(${{PROJECT_NAME}} PRIVATE "${{CMAKE_CURRENT_SOURCE_DIR}}/include")
@@ -182,9 +193,9 @@ CompileFlags:
   CompilationDatabase: build/debug   # where CMake writes compile_commands.json
 Diagnostics:
   ClangTidy:
-    FastCheckFilter: Strict          # live linting only runs fast checks; `lint` task runs everything
-  UnusedIncludes: Strict
-  MissingIncludes: Strict
+    FastCheckFilter: Strict          # (default) live linting only runs fast checks; `lint` runs all
+  UnusedIncludes: Strict             # (default since clangd 17)
+  MissingIncludes: Strict            # off by default: also flag headers you rely on but don't include
 InlayHints:
   Enabled: true
   ParameterNames: true
@@ -215,7 +226,7 @@ Checks: >
   -readability-magic-numbers,
   -readability-identifier-length
 WarningsAsErrors: ''
-HeaderFilterRegex: '.*/(src|include)/.*'
+HeaderFilterRegex: '.*[/\\\\](src|include)[/\\\\].*'
 FormatStyle: file
 """
 
@@ -282,8 +293,9 @@ def zed_debug(name: str) -> str:
             "program": f"$ZED_WORKTREE_ROOT/build/debug/{name}{EXE}",
             "args": [],
             "cwd": "$ZED_WORKTREE_ROOT",
-            # LeakSanitizer can't run under a debugger (ptrace); keep ASan, drop leak checks.
-            # (Windows ASan has no leak checker, so only abort_on_error applies there.)
+            # Linux: LeakSanitizer can't run under a debugger (ptrace), so leak checks are
+            # turned off here. macOS: LSan is off by default anyway (unreliable on Apple
+            # Silicon), so the setting is a no-op. Windows ASan has no leak checker.
             "env": {"ASAN_OPTIONS": "abort_on_error=1" if IS_WIN
                     else "detect_leaks=0:abort_on_error=1"},
             "build": "build (debug)",
@@ -302,15 +314,25 @@ ZED_SETTINGS = """\
 """
 
 MAIN_CPP = """\
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <numeric>
 #include <vector>
 
-int main() {
+// The `try` around main's body reports any exception that escapes, instead of letting
+// the program end in std::terminate (clang-tidy: bugprone-exception-escape).
+int main() try {
     std::vector<int> values{1, 2, 3, 4, 5};
-    const int sum = std::accumulate(values.begin(), values.end(), 0);  // set a breakpoint here
+    const int sum = std::accumulate(values.begin(), values.end(), 0); // set a breakpoint here
     std::cout << "sum = " << sum << '\\n';
-    return 0;
+    return EXIT_SUCCESS;
+} catch (const std::exception& e) {
+    static_cast<void>(std::fputs("error: ", stderr));
+    static_cast<void>(std::fputs(e.what(), stderr));
+    static_cast<void>(std::fputs("\\n", stderr));
+    return EXIT_FAILURE;
 }
 """
 
@@ -321,7 +343,7 @@ int main(void) {
     int values[] = {1, 2, 3, 4, 5};
     int sum = 0;
     for (size_t i = 0; i < sizeof values / sizeof values[0]; ++i) {
-        sum += values[i];  // set a breakpoint here
+        sum += values[i]; // set a breakpoint here
     }
     printf("sum = %d\\n", sum);
     return 0;
@@ -381,7 +403,7 @@ def wizard() -> argparse.Namespace:
     print("=== New C/C++ project ===  (Enter accepts the [default], Ctrl+C cancels)\n")
     while True:
         name = _ask("Project name")
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", name):
+        if re.fullmatch(NAME_RE, name):
             break
         print("  Letters, digits, _ and - only; must start with a letter or _.")
 
@@ -399,7 +421,10 @@ def wizard() -> argparse.Namespace:
     except (OSError, ValueError):
         pass
     print()
-    location = Path(_ask("Create it inside which folder", last or str(Path.home()))).expanduser()
+    # resolve(): store an absolute path, so the remembered default means the same folder
+    # no matter where the wizard is started from next time.
+    location = Path(_ask("Create it inside which folder", last or str(Path.home()))) \
+        .expanduser().resolve()
 
     print()
     git = _yes("Initialise a git repo")
@@ -408,6 +433,9 @@ def wizard() -> argparse.Namespace:
     target = location / name
     print(f"\n  {('C++' if lang == 'cpp' else 'C')}{std} project → {target}"
           f"\n  git: {'yes' if git else 'no'}   open in Zed: {'yes' if open_zed else 'no'}")
+    if target.exists() and not target.is_dir():
+        print(f"  {target} exists and is a file, not a folder.")
+        sys.exit(2)
     if target.exists() and any(target.iterdir()):
         print("  (folder exists and isn't empty: existing files are kept, missing ones added)")
     if not _yes("\nCreate it", True):
@@ -435,8 +463,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Scaffold a C/C++ CMake project wired for Zed. "
                                  "Run with no arguments for the interactive wizard.")
     ap.add_argument("name", nargs="?", help="project name (also the directory and executable name)")
-    ap.add_argument("--lang", choices=("cpp", "c"), default="cpp")
-    ap.add_argument("--std", help="language standard (default: 20 for C++, 17 for C)")
+    ap.add_argument("--lang", choices=("cpp", "c"),
+                    help="language (default: detected from existing src/ files, else cpp)")
+    ap.add_argument("--std", help="language standard: C++ 17/20/23/26 (default 20), "
+                    "C 99/11/17/23 (default 17)")
     ap.add_argument("--here", action="store_true", help="scaffold into the current directory")
     ap.add_argument("--no-git", action="store_true", help="skip `git init`")
     ap.add_argument("--no-configure", action="store_true", help="skip the initial CMake configure")
@@ -447,26 +477,61 @@ def main() -> int:
     return create(a)
 
 
+def find_sources(root: Path) -> dict[str, bool]:
+    """Which languages already have source files under root/src (searched recursively,
+    like the CMake glob)."""
+    src = root / "src"
+    found = {"cpp": False, "c": False}
+    if src.is_dir():
+        for f in src.rglob("*"):
+            for lang, exts in SOURCE_EXTS.items():
+                if f.suffix in exts and f.is_file():
+                    found[lang] = True
+    return found
+
+
+def fail(msg: str) -> int:
+    print(f"new-cpp: {msg}", file=sys.stderr)
+    return 2
+
+
 def create(a: argparse.Namespace) -> int:
+    if a.name and not re.fullmatch(NAME_RE, a.name):
+        return fail(f"invalid project name {a.name!r}: use letters, digits, _ and -, "
+                    "starting with a letter or _")
     if a.here:
         root = Path.cwd()
-        name = a.name or root.name
+        # A folder name may contain spaces etc.; turn those into _ for the CMake target.
+        name = a.name or re.sub(r"[^A-Za-z0-9_-]", "_", root.name)
+        if not re.fullmatch(NAME_RE, name):
+            return fail(f"folder name {root.name!r} doesn't make a valid project name; "
+                        "pass one explicitly: new-cpp NAME --here")
+        if name != root.name and not a.name:
+            print(f"  (project name: {name})")
     else:
         root = Path.cwd() / a.name
         name = a.name
+    if root.exists() and not root.is_dir():
+        return fail(f"{root} exists and is not a folder")
 
-    name = re.sub(r"[^A-Za-z0-9_-]", "_", name)
-    if not name or name[0].isdigit():
-        print(f"new-cpp: invalid project name {name!r}: must start with a letter or underscore")
-        return 2
+    has = find_sources(root)
+    other = {"cpp": "c", "c": "cpp"}
+    lang = a.lang or ("c" if has["c"] and not has["cpp"] else "cpp")
+    if not has[lang] and has[other[lang]]:
+        return fail(f"src/ has only {'C' if lang == 'cpp' else 'C++'} sources, but the "
+                    f"language is {'C++' if lang == 'cpp' else 'C'}; "
+                    f"use --lang {other[lang]}")
 
-    std = a.std or ("20" if a.lang == "cpp" else "17")
+    std = a.std or DEFAULT_STD[lang]
+    if std not in STANDARDS[lang]:
+        return fail(f"--std {std} isn't valid for {'C++' if lang == 'cpp' else 'C'}; "
+                    f"choose one of {', '.join(STANDARDS[lang])}")
     root.mkdir(parents=True, exist_ok=True)
 
     created: list[str] = []
     skipped: list[str] = []
     files = {
-        "CMakeLists.txt": cmakelists(name, a.lang, std),
+        "CMakeLists.txt": cmakelists(name, lang, std),
         "CMakePresets.json": presets(),
         ".clangd": CLANGD,
         ".clang-tidy": CLANG_TIDY,
@@ -476,9 +541,9 @@ def create(a: argparse.Namespace) -> int:
         ".zed/debug.json": zed_debug(name),
         ".zed/settings.json": ZED_SETTINGS,
     }
-    src = "src/main.cpp" if a.lang == "cpp" else "src/main.c"
-    if not any((root / "src").glob("*.c*")):
-        files[src] = MAIN_CPP if a.lang == "cpp" else MAIN_C
+    if not has[lang]:
+        files["src/main.cpp" if lang == "cpp" else "src/main.c"] = \
+            MAIN_CPP if lang == "cpp" else MAIN_C
     (root / "include").mkdir(exist_ok=True)
 
     for rel, content in files.items():
@@ -494,6 +559,7 @@ def create(a: argparse.Namespace) -> int:
         subprocess.run(["git", "init", "-q"], cwd=root, check=False)
         print("  + git repo")
 
+    status = 0
     if not a.no_configure:
         missing = [t for t in ("cmake", "ninja") if not shutil.which(t)]
         if missing:
@@ -505,6 +571,7 @@ def create(a: argparse.Namespace) -> int:
                 print("  + configured build/debug (compile_commands.json ready for clangd)")
             else:
                 print("  ! cmake configure failed:\n" + r.stderr.strip())
+                status = 1   # non-zero keeps the wizard's Zed terminal open (hide: on_success)
 
     if a.open:
         zed = shutil.which("zed")
@@ -515,7 +582,7 @@ def create(a: argparse.Namespace) -> int:
             subprocess.run(cmd, check=False)
         else:
             print("  ! `zed` CLI not found (Zed → command palette → `cli: install`)")
-    return 0
+    return status
 
 
 if __name__ == "__main__":

@@ -1,0 +1,73 @@
+# Runs the regression suite (tests/test_new_cpp.py) on the owner's two platforms plus Linux:
+# generates C and C++ projects, builds them with ASan/UBSan, runs ctest, and requires a
+# warning-free clang-tidy pass. Runner contents checked 2026-11 against actions/runner-images.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Syntax check
+        run: python3 -m py_compile new-cpp install.py
+        if: runner.os != 'Windows'
+      - name: Syntax check (Windows)
+        run: python -m py_compile new-cpp install.py
+        if: runner.os == 'Windows'
+
+      # macOS: Apple clang stays the compiler (as on the owner's Mac). The image ships
+      # Homebrew llvm@20 unlinked, so expose only clang-tidy / clang-format — putting its
+      # whole bin/ on PATH would also shadow Apple's clang.
+      - name: Expose Homebrew clang-tidy and clang-format (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          llvm="$(brew --prefix llvm@20)/bin"
+          mkdir -p "$RUNNER_TEMP/llvm-tools"
+          ln -s "$llvm/clang-tidy" "$llvm/clang-format" "$RUNNER_TEMP/llvm-tools/"
+          echo "$RUNNER_TEMP/llvm-tools" >> "$GITHUB_PATH"
+
+      # Windows: the image has MSVC-target LLVM and C:\mingw64 (gcc) on PATH; llvm-mingw
+      # must come first so `clang`/`clang++` (pinned in the presets) are its compilers.
+      - name: Install llvm-mingw (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo mstorsjo/llvm-mingw `
+            --pattern 'llvm-mingw-*-ucrt-x86_64.zip' --dir $env:RUNNER_TEMP
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\llvm-mingw-*-ucrt-x86_64.zip"
+          Expand-Archive $zip.FullName -DestinationPath $env:RUNNER_TEMP
+          "$env:RUNNER_TEMP\$($zip.BaseName)\bin" >> $env:GITHUB_PATH
+
+      - name: Check toolchain
+        shell: bash
+        run: |
+          cmake --version | head -1
+          ninja --version
+          clang-tidy --version | grep -i version
+          if [ "$RUNNER_OS" = Windows ]; then
+            # No /dev/stderr in Git Bash on Windows, so capture instead of tee.
+            v="$(clang --version)"; echo "$v"; command -v clang
+            grep -q 'windows-gnu' <<<"$v" \
+              || { echo "::error::clang on PATH is not llvm-mingw"; exit 1; }
+          fi
+
+      - name: Tests
+        shell: bash
+        run: |
+          py=python3; [ "$RUNNER_OS" = Windows ] && py=python
+          $py -m unittest discover -s tests -v

@@ -20,6 +20,7 @@ Mode on (otherwise a copy). Re-run this script after `git pull`.
 
 from __future__ import annotations
 
+import filecmp
 import os
 import platform
 import shutil
@@ -39,7 +40,12 @@ def zed_config_dir() -> Path:
 
 def backup(dest: Path) -> None:
     if dest.exists() or dest.is_symlink():
-        bak = dest.with_name(f"{dest.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        bak = dest.with_name(f"{dest.name}.bak-{stamp}")
+        n = 1
+        while bak.exists() or bak.is_symlink():   # two runs in the same second
+            bak = dest.with_name(f"{dest.name}.bak-{stamp}-{n}")
+            n += 1
         dest.rename(bak)
         print(f"  ~ kept your old {dest.name} as {bak.name}")
 
@@ -48,6 +54,11 @@ def link(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.is_symlink() and dest.resolve() == src.resolve():
         print(f"  = {dest} (already linked)")
+        return
+    # A plain copy from an earlier run (no symlink rights, e.g. Windows without Developer
+    # Mode) that still matches the repo needs nothing: don't pile up a backup every run.
+    if dest.is_file() and not dest.is_symlink() and filecmp.cmp(src, dest, shallow=False):
+        print(f"  = {dest} (copy, up to date)")
         return
     backup(dest)
     try:
