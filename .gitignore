@@ -3,3 +3,4 @@ settings.json
 *.bak-*
 .DS_Store
 __pycache__/
+CLAUDE.md
